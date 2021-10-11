@@ -1,0 +1,81 @@
+---
+# tasks file for post-install
+
+- name: Enable EPEL Repository on CentOS 7
+  yum:
+    name: epel-release
+    state: latest
+  when: ansible_facts['os_family'] == 'RedHat' and ansible_facts ['distribution_major_version'] == '7'
+
+- name: Install common utilites via yum...
+  yum: name={{ common_utils_yum }} state=present
+  when: ansible_os_family == "RedHat" and not (ansible_distribution == "CentOS" and ansible_distribution_major_version == "8")
+
+- name: CENTOS8 Installing EPEL repo...
+  dnf: name=epel-release state=installed
+  when: ansible_distribution == "CentOS" and ansible_distribution_major_version == "8"
+
+- name: CENTOS8 Installing Playbook YUM deps...
+  dnf:
+    name: "{{ dnf_packages }}"
+    state: installed
+    enablerepo: epel
+  when: ansible_distribution == "CentOS" and ansible_distribution_major_version == "8"
+
+- name: CENTOS 8 Install common utilites via yum...
+  dnf:
+    name: "{{ common_utils_dnf }}"
+    state: present
+  when: ansible_distribution == "CentOS" and ansible_distribution_major_version == "8"
+
+- name: Enable haveged...
+  service: name=haveged state=restarted enabled=yes
+  when: ansible_os_family == "RedHat" and (ansible_virtualization_role is defined and ansible_virtualization_role == "guest")
+
+- name: Remove sysstat cron task...
+  file: state=absent dest=/etc/cron.d/sysstat
+  when: ansible_os_family == "RedHat"
+
+- name: set hostname
+  hostname: name={{ inventory_hostname }}
+
+- name: Add Ansible inventory mappings to /etc/hosts
+  become: true
+  blockinfile:
+    path: /etc/hosts
+    block: |
+      {% for host in groups['all'] %}
+      {{ hostvars[host].ansible_host }} {{ host }}
+      {% endfor %}
+
+- name: Set timezone to MSK
+  timezone:
+    name: Europe/Moscow
+
+- name: Disable SELinux
+  selinux:
+    state: disabled
+
+- name: check if netplan uses ipv6
+  shell: "[[ $(grep -sE '\ [0-9a-f]{4,4}:' /{etc,lib,run}/netplan/*.yaml -l || true) == '' ]] && echo no-ipv6-found || echo netplan-has-ipv6"
+  args:
+    executable: /bin/bash
+  register: netplan_ip6_result
+  ignore_errors: True
+
+- name: remove ipv6 netplan addresses prior to disabling ipv6
+  shell: |
+    for f in /{etc,lib,run}/netplan/*.yaml;
+      do [[ -f $f ]] && cp $f $f.bak-$(date +%s) && sed -E '/\ [0-9a-f]{4,4}:/d' -i $f || true;
+    done
+  args:
+    executable: /bin/bash
+  when:
+    - netplan_ip6_result.stdout is defined and netplan_ip6_result.stdout == 'netplan-has-ipv6' and disable_ipv6 == True
+
+- name: Copying sysctl.conf...
+  template: src="{{ sysctl_profile | default('common') }}.sysctl" dest=/etc/sysctl.conf backup=yes
+  notify: apply sysctl
+
+- name: Releasing ulimit...
+  copy: src=unlimited-nrpoc-nofile.conf dest=/etc/security/limits.conf
